@@ -9,3 +9,5 @@ A simple native android mod loader that doesn't require permissions
 
 ## Known Issues
 JNI_OnLoad isn't called, but that should be a simple fix
+
+Crash when trying to overwrite a file, I am trying to come up with a solution
