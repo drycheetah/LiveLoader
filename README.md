@@ -6,3 +6,6 @@ A simple native android mod loader that doesn't require permissions
 2. Launch the game once to create a folder at ```Android/data/packageName/nativemods```
 3. Close the game
 4. From all native libs in the directory will be loaded
+
+## Known Issues
+JNI_OnLoad isn't called, but that should be a simple fix
