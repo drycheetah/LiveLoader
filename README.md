@@ -1,5 +1,5 @@
 # ModLoader
-A simple native android mod loader that doesn't require permissions
+A simple native android mod loader that doesn't require permissions with JNI_OnLoad support
 
 ## How to use
 1. Load the lib
@@ -8,6 +8,4 @@ A simple native android mod loader that doesn't require permissions
 4. From all native libs in the directory will be loaded
 
 ## Known Issues
-JNI_OnLoad isn't called, but that should be a simple fix
-
-Crash when trying to overwrite a file, I am trying to come up with a solution
+none
