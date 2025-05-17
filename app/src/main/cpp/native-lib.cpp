@@ -16,8 +16,8 @@ using namespace std;
 namespace fs = std::__fs::filesystem;
 
 const char *GetPackageName() {
-    char *application_id[256];
-    FILE *fp = fopen("proc/self/cmdline", "r");
+    char *application_id[256] = {0};
+    FILE *fp = fopen("/proc/self/cmdline", "r");
     if (fp) {
         fread(application_id, sizeof(application_id), 1, fp);
         fclose(fp);
@@ -53,23 +53,28 @@ void Load(){
         }
 
         //full path of the file in the nativemods folder
-        auto external_path = entry.path().c_str();
-
-        //the games internal data directory
-        auto internalPath = string("/data/data/").append(GetPackageName()).append("/files/").append(entry.path().filename()).c_str();
+        string external_path = entry.path();
+        // internal path that can be used to load libraries
+        //kept as a string for safety
+        std::string internalPath = string("/data/data/") + GetPackageName() + "/files/" + entry.path().filename().string();
 
         //check if an instance of this file exists in the internal directory and if so, delete it
         if(fs::exists(internalPath)) fs::remove(internalPath);
 
         //copy the file in the nativemods directory into the internal directory
         //this is because we are unable to load external files
-        if (!fs::copy_file(external_path, internalPath)) {
-            //if it fails, log an error
-            LOGE("Failed to copy .so to internal storage.");
+        try {
+            if (!fs::copy_file(external_path, internalPath, fs::copy_options::overwrite_existing)) {
+                LOGE("Failed to copy .so to internal storage.");
+                continue;
+            }
+        } catch (const fs::filesystem_error& e) {
+            LOGE("Exception during copy_file: %s", e.what());
             continue;
         }
+
         //load the file with dlopen
-        auto handle = dlopen(internalPath, RTLD_LAZY);
+        auto handle = dlopen(internalPath.c_str(), RTLD_LAZY);
 
         //log the state
         if (handle == nullptr) {
