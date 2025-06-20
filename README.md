@@ -8,4 +8,4 @@ A simple native android mod loader that doesn't require permissions with JNI_OnL
 4. From all native libs in the directory will be loaded
 
 ## Known Issues
-none
+In some games you may have to load the game twice before the nativemods folder is created
