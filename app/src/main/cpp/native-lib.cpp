@@ -1,110 +1,136 @@
 #include <thread>
-#include "dlfcn.h"
+#include <dlfcn.h>
 #include <filesystem>
-#include "fstream"
+#include <fstream>
 #include <fcntl.h>
 #include <android/log.h>
 #include <unistd.h>
-#include "jni.h"
+#include <jni.h>
+#include <cstdlib>
 
-using namespace std;
+#include "json.hpp" // Download from: https://github.com/nlohmann/json
+using json = nlohmann::json;
+namespace fs = std::__fs::filesystem;
 
 #define _TAG "ModLoader"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,_TAG,__VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,_TAG,__VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,_TAG,__VA_ARGS__)
 
-//just makes it easier
-namespace fs = std::__fs::filesystem;
-
-const char *GetPackageName() {
-    char *application_id[256] = {0};
-    FILE *fp = fopen("/proc/self/cmdline", "r");
+const char* GetPackageName() {
+    static char application_id[256] = {0};
+    FILE* fp = fopen("/proc/self/cmdline", "r");
     if (fp) {
         fread(application_id, sizeof(application_id), 1, fp);
         fclose(fp);
     }
-    return (const char *) application_id;
+    return application_id;
 }
 
-void TryLoadWithJNI(JavaVM* vm){
+void unzipLmod(const std::string& zipPath, const std::string& destDir) {
+    std::string command = "unzip -o \"" + zipPath + "\" -d \"" + destDir + "\"";
+    int result = system(command.c_str());
+    if (result != 0) {
+        LOGE("Failed to unzip %s", zipPath.c_str());
+    }
+}
 
-    //get directory that can be easily accessed
-    string localDirectory = string("/storage/emulated/0/Android/data/").append(
-            GetPackageName());
+void TryLoadWithJNI(JavaVM* vm) {
+    std::string localDirectory = std::string("/storage/emulated/0/Android/data/") + GetPackageName();
 
-    //Make sure it doesn't try make native mods folder before game has created the data folder
-    if(!fs::exists(localDirectory)){
+    if (!fs::exists(localDirectory)) {
+        LOGW("Waiting for game to create directory...");
         return;
     }
 
-    //the folder where all mods will be placed
-    string localModsDirectory = localDirectory.append("/nativemods");
-
-    //check if the nativemods folder exists
-    if(!fs::exists(localModsDirectory)) {
-        //if not create the folder
-        fs::create_directory(localModsDirectory.c_str());
-        LOGI("SETUP FINISHED, PLEASE RESTART GAME");
-        //return so the rest of the code does not run
+    std::string localModsDirectory = localDirectory + "/nativemods";
+    if (!fs::exists(localModsDirectory)) {
+        fs::create_directory(localModsDirectory);
+        LOGI("SETUP COMPLETE: Add .lmod files to %s", localModsDirectory.c_str());
         return;
     }
-    //go through every file in the nativemods folder
+
     for (const auto& entry : fs::directory_iterator(localModsDirectory)) {
-        //check if it a normal file
-        if (!fs::is_regular_file(entry.status())) {
+        if (!fs::is_regular_file(entry.status())) continue;
+        if (entry.path().extension() != ".lmod") continue;
+
+        std::string modName = entry.path().stem().string();
+        std::string extractPath = std::string("/data/data/") + GetPackageName() + "/files/extracted/" + modName;
+        fs::create_directories(extractPath);
+
+        unzipLmod(entry.path().string(), extractPath);
+
+        std::string modJsonPath = extractPath + "/mod.json";
+        if (!fs::exists(modJsonPath)) {
+            LOGE("mod.json not found in %s", modName.c_str());
             continue;
         }
-        //make sure it is a native library
-        if(entry.path().extension() != ".so"){
-            continue;
-        }
 
-        //full path of the file in the nativemods folder
-        string external_path = entry.path();
-        // internal path that can be used to load libraries
-        //kept as a string for safety
-        std::string internalPath = string("/data/data/") + GetPackageName() + "/files/" + entry.path().filename().string();
-
-        //check if an instance of this file exists in the internal directory and if so, delete it
-        if(fs::exists(internalPath)) fs::remove(internalPath);
-
-        //copy the file in the nativemods directory into the internal directory
-        //this is because we are unable to load external files
+        json modInfo;
         try {
-            if (!fs::copy_file(external_path, internalPath, fs::copy_options::overwrite_existing)) {
-                LOGE("Failed to copy .so to internal storage.");
-                continue;
-            }
-        } catch (const fs::filesystem_error& e) {
-            LOGE("Exception during copy_file: %s", e.what());
+            modInfo = json::parse(std::ifstream(modJsonPath));
+        } catch (std::exception& e) {
+            LOGE("Failed to parse mod.json in %s: %s", modName.c_str(), e.what());
             continue;
         }
 
-        //load the file with dlopen
-        auto handle = dlopen(internalPath.c_str(), RTLD_NOW);
+        std::string soName = modInfo["library"];
+        std::string soExtractPath = extractPath + "/" + soName;
+        std::string internalSoPath = std::string("/data/data/") + GetPackageName() + "/files/" + soName;
 
-        //log the state
-        if (handle == nullptr) {
-            LOGE("Failed to load %s: %s", entry.path().c_str(), dlerror());
+        if (!fs::exists(soExtractPath)) {
+            LOGE("Library %s not found in mod %s", soExtractPath.c_str(), modName.c_str());
+            continue;
         }
-        else{
-            LOGI("Successfully loaded %s", entry.path().filename().c_str());
-            auto jniOnLoad = (jint (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
-            if(jniOnLoad){
-                LOGI("jniOnLoad found in %s", entry.path().filename().c_str());
-                jniOnLoad(vm, nullptr);
+
+        try {
+            fs::copy_file(soExtractPath, internalSoPath, fs::copy_options::overwrite_existing);
+        } catch (fs::filesystem_error& e) {
+            LOGE("Error copying .so: %s", e.what());
+            continue;
+        }
+
+        if (modInfo.contains("asset")) {
+            std::string assetFile = modInfo["asset"];
+            std::string srcAssetPath = extractPath + "/" + assetFile;
+            std::string dstAssetPath;
+
+            if (modInfo["engine"] == "unity") {
+                dstAssetPath = std::string("/data/data/") + GetPackageName() + "/files/unitymods/" + assetFile;
+            } else if (modInfo["engine"] == "unreal") {
+                dstAssetPath = std::string("/data/data/") + GetPackageName() + "/files/ue4mods/" + assetFile;
             }
-            else{
-                LOGW("JNI_OnLoad not found in %s", entry.path().filename().c_str());
+
+            try {
+                if (!dstAssetPath.empty() && fs::exists(srcAssetPath)) {
+                    fs::create_directories(fs::path(dstAssetPath).parent_path());
+                    fs::copy_file(srcAssetPath, dstAssetPath, fs::copy_options::overwrite_existing);
+                    LOGI("Copied asset to %s", dstAssetPath.c_str());
+                }
+            } catch (fs::filesystem_error& e) {
+                LOGW("Asset copy failed for %s: %s", assetFile.c_str(), e.what());
             }
+        }
+
+        void* handle = dlopen(internalSoPath.c_str(), RTLD_NOW);
+        if (!handle) {
+            LOGE("Failed to dlopen %s: %s", internalSoPath.c_str(), dlerror());
+            continue;
+        }
+
+        LOGI("Successfully loaded: %s", soName.c_str());
+
+        auto jniOnLoad = (jint (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
+        if (jniOnLoad) {
+            LOGI("JNI_OnLoad found, invoking...");
+            jniOnLoad(vm, nullptr);
+        } else {
+            LOGW("JNI_OnLoad not found in %s", soName.c_str());
         }
     }
-
 }
 
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, [[maybe_unused]] void *reserved) {
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     TryLoadWithJNI(vm);
-
     return JNI_VERSION_1_6;
 }
